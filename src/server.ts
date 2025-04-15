@@ -3,6 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { StreamChat } from 'stream-chat';
 import OpenAI from 'openai';
+import { db } from './config/database.js';
+import { chats, users } from './db/schema.js';
+import { eq } from 'drizzle-orm';
+import { ChatCompletionMessageParam } from 'openai/resources';
 
 dotenv.config();
 
@@ -48,6 +52,21 @@ app.post(
         });
       }
 
+      // Check for existing users in database
+      const existingUser = await db
+        .select()
+        .from(users)
+        .where(eq(users.userId, userId));
+
+      if (!existingUser.length) {
+        console.log(
+          `User ${userId} does not exist in the database. Adding them...`,
+        );
+        await db.insert(users).values({ userId, name, email });
+      } else {
+        console.log(`User ${userId} already exists`);
+      }
+
       res.status(200).json({ userId, name, email });
     } catch (error) {
       res.status(500).json({ error: 'Internal Server Error' });
@@ -73,22 +92,70 @@ app.post('/chat', async (req: Request, res: Response): Promise<any> => {
         .json({ error: 'user not found. Please register first' });
     }
 
+    // Check user in database
+    const existingUser = await db
+      .select()
+      .from(users)
+      .where(eq(users.userId, userId));
+
+    if (!existingUser.length) {
+      return res
+        .status(404)
+        .json({ error: 'User not found in database, please register first' });
+    }
+
+    // Send message to OpenAI gpt-4o
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
-      messages: message,
+      messages: [{ role: 'user', content: message }],
     });
 
     const aiMessage: string =
       response.choices[0].message?.content ?? 'No response from AI';
 
-    console.log(aiMessage);
-    res.status(200).json({ reply: aiMessage });
+    // Save chat to database
+    await db.insert(chats).values({ userId, message, reply: aiMessage });
+
+    // Create or get channel
+    const channel = chatClient.channel('messaging', `chat-${userId}`, {
+      name: 'AI Chat',
+      created_by_id: 'ai_bot',
+    });
+
+    await channel.create();
+    await channel.sendMessage({
+      text: aiMessage,
+      user_id: 'ai_bot',
+    });
+
+    res.status(200).json({
+      reply: aiMessage,
+    });
   } catch (error) {
     console.log('Error generating AI response', error);
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 
+// Get chat history for a user
+app.post('/get-messages', async (req: Request, res: Response): Promise<any> => {
+  const { userId } = req.body;
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
+
+  try {
+    const chatHistory = await db
+      .select()
+      .from(chats)
+      .where(eq(chats.userId, userId));
+
+    res.status(200).json({ messages: chatHistory });
+  } catch (error) {
+    console.log('Error fetching chat history', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
