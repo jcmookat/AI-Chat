@@ -69,6 +69,7 @@ app.post(
 
       res.status(200).json({ userId, name, email });
     } catch (error) {
+      console.log('Internal Server error', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   },
